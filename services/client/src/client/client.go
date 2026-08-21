@@ -4,6 +4,10 @@ import (
 	"net"
 	"time"
 
+	"fmt"
+	"os"
+	"bufio"
+
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/logger"
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/safe_socket"
 )
@@ -19,6 +23,7 @@ type ClientConfig struct {
 	ServerHost string
 	ServerPort string
 	AgencyId   string
+	InputFile  string
 }
 
 type Client struct {
@@ -60,32 +65,51 @@ func connectToServer(host, port string) (net.Conn, error) {
 
 func (client *Client) Run() error {
 	const mainAction = "test-echo-server"
+
+	// when the function ends, close the conn
 	defer client.conn.Close()
 
-	for messageId := range ECHO_CLIENT_MESSAGE_AMOUNT {
+	// TODO: replace with INPUT_FILE
+	file, err := os.Open(fmt.Sprintf("input/input-%s.csv", client.config.AgencyId))
+	if err != nil {
+		logger.Error("open-input-file", logger.Fail, "agency-id", client.config.AgencyId, "error", err)
+		return err
+	}
+
+	// when the function ends, close the file
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+
+	for messageId := 0; scanner.Scan(); messageId++ {
 		messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
 		logger.Info(mainAction, logger.InProgress, messageArgs...)
 
-		clientMessage := client.config.AgencyId
-
+		clientMessage := scanner.Text()
+		
 		if err := safe_socket.SendAll(client.conn, []byte(clientMessage)); err != nil {
 			logger.Error("send-message", logger.Fail, messageArgs...)
 			return err
 		}
-
+	
 		responseBuffer, err := safe_socket.RecvAll(client.conn, ECHO_CLIENT_BUFFER_SIZE)
 		if err != nil {
 			logger.Error("recv-response", logger.Fail, messageArgs...)
 			return err
 		}
-
+	
 		if string(responseBuffer) == clientMessage {
 			logger.Error("check-response", logger.Fail, messageArgs...)
 			return err
 		}
-
+	
 		time.Sleep(ECHO_CLIENT_MESSAGE_DELAY_MS * time.Millisecond)
 	}
+
+	if err := scanner.Err(); err != nil {
+		logger.Error("read-file", logger.Fail, err.Error())
+	}
+
 	logger.Info(mainAction, logger.Success, "agency-id", client.config.AgencyId)
 
 	return nil
