@@ -4,7 +4,6 @@ import (
 	"net"
 	"time"
 
-	"fmt"
 	"os"
 	"bufio"
 
@@ -24,6 +23,7 @@ type ClientConfig struct {
 	ServerPort string
 	AgencyId   string
 	InputFile  string
+	OutputFile string
 }
 
 type Client struct {
@@ -69,17 +69,23 @@ func (client *Client) Run() error {
 	// when the function ends, close the conn
 	defer client.conn.Close()
 
-	// TODO: replace with INPUT_FILE
-	file, err := os.Open(fmt.Sprintf("input/input-%s.csv", client.config.AgencyId))
+	readFile, err := os.Open(client.config.InputFile)
 	if err != nil {
 		logger.Error("open-input-file", logger.Fail, "agency-id", client.config.AgencyId, "error", err)
 		return err
 	}
 
-	// when the function ends, close the file
-	defer file.Close()
+	defer readFile.Close()
 
-	scanner := bufio.NewScanner(file)
+	writeFile, err := os.OpenFile(client.config.OutputFile, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
+	if err != nil {
+		logger.Error("open-output-file", logger.Fail, "agency-id", client.config.AgencyId, "error", err)
+		return err
+	}
+
+	defer writeFile.Close()
+
+	scanner := bufio.NewScanner(readFile)
 
 	for messageId := 0; scanner.Scan(); messageId++ {
 		messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
@@ -102,7 +108,13 @@ func (client *Client) Run() error {
 			logger.Error("check-response", logger.Fail, messageArgs...)
 			return err
 		}
-	
+
+		_, err = writeFile.WriteString(string(responseBuffer) + "\n")
+		if err != nil {
+			logger.Error("write-file", logger.Fail, messageArgs...)
+			return err
+		}
+
 		time.Sleep(ECHO_CLIENT_MESSAGE_DELAY_MS * time.Millisecond)
 	}
 
