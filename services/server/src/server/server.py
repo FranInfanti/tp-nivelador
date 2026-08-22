@@ -2,12 +2,41 @@ import socket
 import logger
 import safe_socket
 
-_ECHO_SERVER_MESSAGE_SIZE = 1024
+_LENGTH_SIZE = 1
+_PAYLOAD_SIZE = 255
 
 class Server:
     def __init__(self, server_host: str, server_port: int) -> None:
         self.server_host = server_host
         self.server_port = server_port
+
+    def _pack_message(self, payload):
+        length = len(payload)
+
+        if length > _PAYLOAD_SIZE:
+            raise ValueError(f"Payload must be lower or equal than {_PAYLOAD_SIZE}")
+
+        packet = bytes([length]) + payload
+        
+        return packet
+
+    def _recv_message(self, client_socket):
+        client_message_header, err = safe_socket.recv_all(
+            client_socket, _LENGTH_SIZE
+        )
+
+        length = client_message_header[0]
+
+        client_message_payload, err = safe_socket.recv_all(
+            client_socket, length
+        )
+
+        return client_message_payload
+
+    def _send_message(self, client_socket, client_message):
+        packet = self._pack_message(client_message)
+
+        safe_socket.send_all(client_socket, packet)
 
     def _handle_client(self, client_socket):
         action = "handle-client"
@@ -15,9 +44,8 @@ class Server:
         try:
             logger.info(action, logger.LogResult.in_progress)
             while True:
-                client_message = safe_socket.recv_all(
-                    client_socket, _ECHO_SERVER_MESSAGE_SIZE
-                )
+                client_message = self._recv_message(client_socket)
+
                 if not client_message:
                     logger.info(
                         action,
@@ -26,8 +54,11 @@ class Server:
                         message_amount,
                     )
                     return
+
                 message_amount += 1
-                safe_socket.send_all(client_socket, client_message)
+                
+                self._send_message(client_socket, client_message)
+
         except Exception as e:
             logger.error(
                 action, logger.LogResult.fail, "messages-amount", message_amount
