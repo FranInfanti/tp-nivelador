@@ -24,6 +24,12 @@ class Server:
         client_message_header, err = safe_socket.recv_all(
             client_socket, _LENGTH_SIZE
         )
+        
+        if err:
+            raise err
+
+        if not client_message_header:
+            return None
 
         length = client_message_header[0]
 

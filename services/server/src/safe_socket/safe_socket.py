@@ -6,10 +6,16 @@ def recv_all(socket: socket.socket, size):
     bytes_remaining = size
     while len(buff) < size:
         try: 
-            buff += socket.recv(bytes_remaining)
+            chunk = socket.recv(bytes_remaining)
+            
+            # if chunk is 0 bytes, then the connection ended
+            if not chunk:
+                return b"", None
+
+            buff += chunk
             bytes_remaining = size - len(buff)
         except OSError as err:
-            return buff, err
+            return b"", err
 
     return buff, None
 
