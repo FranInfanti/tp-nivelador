@@ -3,22 +3,22 @@ import socket
 def recv_all(socket: socket.socket, size):
     buff = b""
     
-    bytesRemaining = size
+    bytes_remaining = size
     while len(buff) < size:
         try: 
-            buff += socket.recv(bytesRemaining)
-            bytesRemaining = size - len(buff)
+            buff += socket.recv(bytes_remaining)
+            bytes_remaining = size - len(buff)
         except OSError as err:
             return buff, err
 
     return buff, None
 
 def send_all(socket: socket.socket, bytes):
-    bytesWritten = 0
+    bytes_written = 0
 
-    while bytesWritten < len(bytes):
+    while bytes_written < len(bytes):
         try:
-            n = socket.send(bytes[bytesWritten:])
-            bytesWritten += n
+            n = socket.send(bytes[bytes_written:])
+            bytes_written += n
         except OSError as err:
             return err
