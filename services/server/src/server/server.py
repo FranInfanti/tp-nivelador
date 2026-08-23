@@ -2,13 +2,28 @@ import socket
 import logger
 import safe_socket
 
-_LENGTH_SIZE = 1
+from lottery import Lottery, Bet
+
+_HEADER_SIZE = 2
 _PAYLOAD_SIZE = 255
 
+def from_csv_to_bet(agency_id, csv):
+    fields = csv.decode("utf-8").strip().split(",")
+    
+    return Bet(
+        agency_id=agency_id,
+        first_name=fields[0],
+        last_name=fields[1],
+        document=fields[2],
+        birthdate=fields[3],
+        number=fields[4]
+    )
+
 class Server:
-    def __init__(self, server_host: str, server_port: int) -> None:
+    def __init__(self, server_host: str, server_port: int, storage_path: str) -> None:
         self.server_host = server_host
         self.server_port = server_port
+        self.lottery = Lottery(storage_path)
 
     def _pack_message(self, payload):
         length = len(payload)
@@ -22,22 +37,23 @@ class Server:
 
     def _recv_message(self, client_socket):
         client_message_header, err = safe_socket.recv_all(
-            client_socket, _LENGTH_SIZE
+            client_socket, _HEADER_SIZE
         )
         
         if err:
             raise err
 
         if not client_message_header:
-            return None
+            return None, None
 
         length = client_message_header[0]
+        agency_id = client_message_header[1]
 
         client_message_payload, err = safe_socket.recv_all(
             client_socket, length
         )
 
-        return client_message_payload
+        return agency_id, client_message_payload
 
     def _send_message(self, client_socket, client_message):
         packet = self._pack_message(client_message)
@@ -50,7 +66,7 @@ class Server:
         try:
             logger.info(action, logger.LogResult.in_progress)
             while True:
-                client_message = self._recv_message(client_socket)
+                agency_id, client_message = self._recv_message(client_socket)
 
                 if not client_message:
                     logger.info(
@@ -61,10 +77,8 @@ class Server:
                     )
                     return
 
+                self.lottery.store_bets([from_csv_to_bet(agency_id, client_message)])
                 message_amount += 1
-                
-                self._send_message(client_socket, client_message)
-
         except Exception as e:
             logger.error(
                 action, logger.LogResult.fail, "messages-amount", message_amount

@@ -7,6 +7,7 @@ import (
 	"os"
 	"bufio"
 	"errors"
+	"strconv"
 
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/logger"
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/safe_socket"
@@ -16,6 +17,7 @@ const CONNECTION_ATTEMPTS_MAX = 3
 const CONNECTION_ATTEMPS_DELAY_MS = 200
 
 const LENGTH_SIZE = 1
+const HEADER_SIZE = 2
 const PAYLOAD_SIZE = 255
 
 type ClientConfig struct {
@@ -63,23 +65,28 @@ func connectToServer(host, port string) (net.Conn, error) {
 	return conn, err
 }
 
-func PackMessage(payload []byte) ([]byte, error) {
+func PackMessage(agencyId string, payload []byte) ([]byte, error) {
 	length := len(payload)
-
 	if length > PAYLOAD_SIZE {
 		return nil, errors.New("Payload must be lower or equal than 255")
 	}
 
-	packet := make([]byte, 1 + length)
+	agencyIdInt, err := strconv.Atoi(agencyId)
+	if err != nil || agencyIdInt < 0 || agencyIdInt > 255 {
+		return nil, errors.New("AgencyId must be an integer between 0 and 255")
+	}
+
+	packet := make([]byte, HEADER_SIZE + length)
 
 	packet[0] = byte(length)
-	copy(packet[1:], payload)
+	packet[1] = byte(agencyIdInt)
+	copy(packet[HEADER_SIZE:], payload)
 
 	return packet, nil
 }
 
 func SendMessage(client *Client, text string, messageArgs []any) error {
-	packet, err := PackMessage([]byte(text))
+	packet, err := PackMessage(client.config.AgencyId, []byte(text))
 	if err != nil {
 		logger.Error("pack-message", logger.Fail, messageArgs...)
 		return err
@@ -93,10 +100,10 @@ func SendMessage(client *Client, text string, messageArgs []any) error {
 	return nil
 }
 
-func RecvMessage(client *Client, messageArgs []any) ([]byte, error) {
-	header, err := safe_socket.RecvAll(client.conn, LENGTH_SIZE)
+func RecvMessage(client *Client) ([]byte, error) {
+	header, err := safe_socket.RecvAll(client.conn, HEADER_SIZE)
 	if err != nil {
-		logger.Error("recv-message-header", logger.Fail, messageArgs...)
+		logger.Error("recv-message-header", logger.Fail)
 		return nil, err
 	}
 
@@ -104,7 +111,7 @@ func RecvMessage(client *Client, messageArgs []any) ([]byte, error) {
 
 	payload, err := safe_socket.RecvAll(client.conn, length)
 	if err != nil {
-		logger.Error("recv-message-payload", logger.Fail, messageArgs...)
+		logger.Error("recv-message-payload", logger.Fail)
 		return nil, err
 	}
 
@@ -144,18 +151,18 @@ func (client *Client) Run() error {
 			logger.Error("send-message", logger.Fail, messageArgs...)
 			return err
 		}
+	}
 
-		responsePayload, err := RecvMessage(client, messageArgs) 
-		if err != nil {
-			logger.Error("recv-message", logger.Fail, messageArgs...)
-			return err
-		}
+	responsePayload, err := RecvMessage(client) 
+	if err != nil {
+		logger.Error("recv-message", logger.Fail)
+		return err
+	}
 
-		_, err = writeFile.WriteString(string(responsePayload) + "\n")
-		if err != nil {
-			logger.Error("write-file", logger.Fail, messageArgs...)
-			return err
-		}
+	_, err = writeFile.WriteString(string(responsePayload) + "\n")
+	if err != nil {
+		logger.Error("write-file", logger.Fail)
+		return err
 	}
 
 	if err := scanner.Err(); err != nil {
