@@ -13,8 +13,6 @@ _OPCODE_EOF = 0
 def from_csv_to_bet(agency_id, csv):
     fields = csv.decode("utf-8").strip().split(",")
     
-    print(fields)
-
     return Bet(
         agency_id=int(agency_id),
         first_name=fields[0],
