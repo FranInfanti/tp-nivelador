@@ -4,17 +4,21 @@ import safe_socket
 
 from lottery import Lottery, Bet
 
-_HEADER_SIZE = 3
+_ENCODING = "utf-8"
+
+_HEADER_SIZE = 4
 _PAYLOAD_SIZE = 255
 
 _OPCODE_DATA = 1
 _OPCODE_EOF = 0
 
-def from_csv_to_bet(agency_id, csv):
-    fields = csv.decode("utf-8").strip().split(",")
+_COLUMNS = 5
+
+def to_bet(agency_id: int, csv: bytes) -> Bet:
+    fields = csv.decode(_ENCODING).strip().split(",")
     
     return Bet(
-        agency_id=int(agency_id),
+        agency_id=agency_id,
         first_name=fields[0],
         last_name=fields[1],
         document=int(fields[2]),
@@ -22,8 +26,34 @@ def from_csv_to_bet(agency_id, csv):
         number=int(fields[4])
     )
 
-def from_bet_to_csv(bet):
-    return bet.agency_id, f"{bet.first_name},{bet.last_name},{bet.document},{bet.birthdate},{bet.number}"
+def to_csv(bet) -> str:
+    return f"{bet.first_name},{bet.last_name},{bet.document},{bet.birthdate},{bet.number}"
+
+def pack_message(opcode: int, agency_id: int, payload: str) -> bytes:
+    if opcode not in [_OPCODE_DATA, _OPCODE_EOF]:
+        raise ValueError(f"Opcode must be valid")
+
+    payload_bytes = payload.encode(_ENCODING)
+    length = len(payload_bytes)
+
+    if length > _PAYLOAD_SIZE:
+        raise ValueError(f"Payload must be lower or equal than {_PAYLOAD_SIZE}")
+    
+    return bytes([opcode]) + bytes([1]) + bytes([length]) + bytes([agency_id]) + payload_bytes
+
+def unpack_message(client_socket: socket.socket) -> (int, int, int, bytes):
+    message_header = safe_socket.recv_all(client_socket, _HEADER_SIZE)
+    
+    if not message_header:
+        return None, None, None, None
+
+    opcode = int(message_header[0])
+    batches = int(message_header[1])
+    length = message_header[2]
+    agency_id = int(message_header[3])
+    message_payload = safe_socket.recv_all(client_socket, length)
+
+    return opcode, batches, agency_id, message_payload     
 
 class Server:
     def __init__(self, server_host: str, server_port: int, storage_path: str) -> None:
@@ -31,48 +61,28 @@ class Server:
         self.server_port = server_port
         self.lottery = Lottery(storage_path)
 
-    def _pack_message(self, opcode, agency_id, payload):
-        if opcode != _OPCODE_DATA and opcode != _OPCODE_EOF:
-            raise ValueError(f"Opcode must exists")
+    def _store_message(self, batch_size: int, agency_id: str, message: bytes):
+        i = 0
+        for _ in range(batch_size):
+            length = message[i]
+            i += 1
+            
+            data = message[i:i + length]
+            i +=  length
 
-        payload_bytes = payload.encode("utf-8")
-        length = len(payload_bytes)
+            bet = to_bet(agency_id, data)
+            self.lottery.store_bets([bet])
 
-        if length > _PAYLOAD_SIZE:
-            raise ValueError(f"Payload must be lower or equal than {_PAYLOAD_SIZE}")
-
-        packet = bytes([opcode]) + bytes([length]) + bytes([agency_id]) + payload_bytes   
-        
-        return packet
-
-    def _recv_message(self, client_socket):
-        client_message_header = safe_socket.recv_all(
-            client_socket, _HEADER_SIZE
-        )
-        
-        if not client_message_header:
-            return None, None, None
-
-        opcode = client_message_header[0]
-        length = client_message_header[1]
-        agency_id = client_message_header[2]
-
-        client_message_payload = safe_socket.recv_all(
-            client_socket, length
-        )
-
-        return opcode, agency_id, client_message_payload
-
-    def _send_message(self, client_socket, opcode, agency_id, client_message):
-        packet = self._pack_message(opcode, agency_id, client_message)
-
-        safe_socket.send_all(client_socket, packet)
-
-    def _send_lottery_winners(self, client_socket, agency_id):
+    def _send_lottery_winners(self, client_socket: socket.socket, agency_id: int):
         for bet in self.lottery.load_bets():
             if self.lottery.has_won(bet) and bet.agency_id == agency_id:
-                _, csv = from_bet_to_csv(bet)
-                self._send_message(client_socket, _OPCODE_DATA, agency_id, csv)
+                csv = to_csv(bet)
+                packet = pack_message(_OPCODE_DATA, agency_id, csv)
+                safe_socket.send_all(client_socket, packet)
+
+        # there are no more winners then send OEF
+        packet = pack_message(_OPCODE_EOF, agency_id, str())
+        safe_socket.send_all(client_socket, packet)
 
     def _handle_client(self, client_socket):
         action = "handle-client"
@@ -81,26 +91,23 @@ class Server:
         try:
             logger.info(action, logger.LogResult.in_progress)
             while True:
-                opcode, agency_id, client_message = self._recv_message(client_socket)
+                opcode, batch_size, agency_id, client_message = unpack_message(client_socket)
 
-                # the conn has ended abruptly
+                # the conn ended while the client was still sending data
                 if opcode is None:
                     logger.warn(action, logger.LogResult.fail, "messages-amount", message_amount)
                     return
-
-                if opcode == _OPCODE_EOF:
+                # the client has no more data to send
+                elif opcode == _OPCODE_EOF:
                     logger.info(action, logger.LogResult.success, "messages-amount", message_amount)
                     break
 
                 message_amount += 1
-                self.lottery.store_bets([from_csv_to_bet(agency_id, client_message)])
+                self._store_message(batch_size, agency_id, client_message)
 
             self._send_lottery_winners(client_socket, agency_id)
-            self._send_message(client_socket, _OPCODE_EOF, agency_id, "")
         except Exception as e:
-            logger.error(
-                action, logger.LogResult.fail, "messages-amount", message_amount
-            )
+            logger.error(action, logger.LogResult.fail, "messages-amount", message_amount)
             raise e
         finally:
             logger.info(action, logger.LogResult.success)
