@@ -22,13 +22,15 @@ func RecvAll(socket io.Reader, size int) ([]byte, error) {
 	bytesRead := 0
 	for bytesRead < size {
 		n, err := socket.Read(buff[bytesRead:])
-
-		if err != nil {
-			return nil, err
-		}
-
 		bytesRead += n
-	}	
+		
+		// an error occured, could be an EOF
+		if err != nil {
+			if bytesRead < size {
+				return nil, err
+			}
+		}
+	}
 
 	return buff, nil
 }

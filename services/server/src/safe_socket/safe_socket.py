@@ -10,14 +10,14 @@ def recv_all(socket: socket.socket, size):
             
             # if chunk is 0 bytes, then the connection ended
             if not chunk:
-                return None, None
+                return b""
 
             buff += chunk
             bytes_remaining = size - len(buff)
         except OSError as err:
-            return b"", err
+            raise err
 
-    return buff, None
+    return buff
 
 def send_all(socket: socket.socket, bytes):
     bytes_written = 0

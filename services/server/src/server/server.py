@@ -46,13 +46,10 @@ class Server:
         return packet
 
     def _recv_message(self, client_socket):
-        client_message_header, err = safe_socket.recv_all(
+        client_message_header = safe_socket.recv_all(
             client_socket, _HEADER_SIZE
         )
         
-        if err:
-            raise err
-
         if not client_message_header:
             return None, None, None
 
@@ -60,7 +57,7 @@ class Server:
         length = client_message_header[1]
         agency_id = client_message_header[2]
 
-        client_message_payload, err = safe_socket.recv_all(
+        client_message_payload = safe_socket.recv_all(
             client_socket, length
         )
 
