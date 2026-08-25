@@ -16,8 +16,8 @@ import (
 const CONNECTION_ATTEMPTS_MAX = 3
 const CONNECTION_ATTEMPS_DELAY_MS = 1000
 
-const HEADER_SIZE = 4
-const PAYLOAD_SIZE = 255
+const HEADER_SIZE = 5
+const PAYLOAD_SIZE = 65535
 
 const COLUMNS = 5
 
@@ -70,8 +70,9 @@ func PackMessage(opcode uint8, batches uint8, agencyId string, payload []byte) (
 
 	packet[0] = byte(opcode)
 	packet[1] = byte(batches)
-	packet[2] = byte(length)
-	packet[3] = byte(agencyIdInt)
+	packet[2] = byte(length >> 8) // save the 8 upper bits in 1 byte
+	packet[3] = byte(length) // save the 8 lower bits in 1 byte, byte() ignores the 8 upper bits
+	packet[4] = byte(agencyIdInt)
 	copy(packet[HEADER_SIZE:], payload)
 
 	return packet, nil
@@ -85,14 +86,20 @@ func UnpackMessage(client *Client) (uint8, uint8, []byte, error) {
 
 	opcode := uint8(header[0])
 	batches := uint8(header[1])
-	length := int(header[2])
-
+	// we take the 8 upper bits and transform it into a 16 bit number and then apply OR with the 8 lower bits
+	length := (int(header[2]) << 8) | int(header[3])
 	payload, err := safe_socket.RecvAll(client.conn, length)
 	if err != nil {
 		return 0, 0, nil, err
 	}
 
 	return opcode, batches, payload, nil
+}
+
+func MakeBatch(batch []byte, payload []byte) ([]byte) {
+	batch = append(batch, payload...)
+	batch = append(batch, '\n')
+	return batch
 }
 
 func SendMessage(client *Client, opcode uint8, batches uint8, message []byte) error {
@@ -140,10 +147,7 @@ func readAndSendLotteryPlayers(client *Client, scanner *bufio.Scanner) error {
 	messageId := 0
 	batch, inBatch := []byte{}, 0
 	for scanner.Scan() {
-		scanner_bytes := scanner.Bytes()
-		length := len(scanner_bytes)
-    	batch = append(batch, byte(length))
-    	batch = append(batch, scanner_bytes...)
+		batch = MakeBatch(batch, scanner.Bytes())
 		inBatch++
 
 		if inBatch < batchSize {

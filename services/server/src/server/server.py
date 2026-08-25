@@ -6,8 +6,8 @@ from lottery import Lottery, Bet
 
 _ENCODING = "utf-8"
 
-_HEADER_SIZE = 4
-_PAYLOAD_SIZE = 255
+_HEADER_SIZE = 5
+_PAYLOAD_SIZE = 65535
 
 _OPCODE_DATA = 1
 _OPCODE_EOF = 0
@@ -26,7 +26,7 @@ def to_bet(agency_id: int, csv: bytes) -> Bet:
         number=int(fields[4])
     )
 
-def to_csv(bet) -> str:
+def to_csv(bet: Bet) -> str:
     return f"{bet.first_name},{bet.last_name},{bet.document},{bet.birthdate},{bet.number}"
 
 def pack_message(opcode: int, agency_id: int, payload: str) -> bytes:
@@ -39,7 +39,10 @@ def pack_message(opcode: int, agency_id: int, payload: str) -> bytes:
     if length > _PAYLOAD_SIZE:
         raise ValueError(f"Payload must be lower or equal than {_PAYLOAD_SIZE}")
     
-    return bytes([opcode]) + bytes([1]) + bytes([length]) + bytes([agency_id]) + payload_bytes
+    length_high = (length >> 8) & 0xFF
+    length_low = length & 0xFF
+
+    return bytes([opcode, 1, length_high, length_low, agency_id]) + payload_bytes
 
 def unpack_message(client_socket: socket.socket) -> (int, int, int, bytes):
     message_header = safe_socket.recv_all(client_socket, _HEADER_SIZE)
@@ -49,8 +52,8 @@ def unpack_message(client_socket: socket.socket) -> (int, int, int, bytes):
 
     opcode = int(message_header[0])
     batches = int(message_header[1])
-    length = message_header[2]
-    agency_id = int(message_header[3])
+    length = (int(message_header[2]) << 8) | int(message_header[3])
+    agency_id = int(message_header[4])
     message_payload = safe_socket.recv_all(client_socket, length)
 
     return opcode, batches, agency_id, message_payload     
@@ -62,16 +65,15 @@ class Server:
         self.lottery = Lottery(storage_path)
 
     def _store_message(self, batch_size: int, agency_id: str, message: bytes):
+        batches = message.strip().split(b'\n')
         i = 0
-        for _ in range(batch_size):
-            length = message[i]
+        for batch in batches:
             i += 1
-            
-            data = message[i:i + length]
-            i +=  length
-
-            bet = to_bet(agency_id, data)
+            bet = to_bet(agency_id, batch)
             self.lottery.store_bets([bet])
+
+        if i != batch_size:
+            raise ValueError(f"Batch size mismatch: expected {batch_size}, got {i}")
 
     def _send_lottery_winners(self, client_socket: socket.socket, agency_id: int):
         for bet in self.lottery.load_bets():
@@ -84,7 +86,7 @@ class Server:
         packet = pack_message(_OPCODE_EOF, agency_id, str())
         safe_socket.send_all(client_socket, packet)
 
-    def _handle_client(self, client_socket):
+    def _handle_client(self, client_socket: socket.socket):
         action = "handle-client"
         message_amount = 0
         agency_id = None
@@ -95,7 +97,7 @@ class Server:
 
                 # the conn ended while the client was still sending data
                 if opcode is None:
-                    logger.warn(action, logger.LogResult.fail, "messages-amount", message_amount)
+                    logger.error(action, logger.LogResult.fail, "messages-amount", message_amount)
                     return
                 # the client has no more data to send
                 elif opcode == _OPCODE_EOF:
