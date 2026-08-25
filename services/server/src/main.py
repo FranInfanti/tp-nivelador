@@ -6,7 +6,7 @@ import server
 
 SERVER_HOST = os.environ["SERVER_HOST"]
 SERVER_PORT = int(os.environ["SERVER_PORT"])
-STORAGE_PATH = os.environ["STORAGE_PATH"]
+STORAGE_PATH = os.getenv("STORAGE_PATH", "./output-server.csv")
 
 def main():
     logger.init()
