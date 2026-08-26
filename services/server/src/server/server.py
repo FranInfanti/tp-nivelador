@@ -1,5 +1,6 @@
 import socket
 import logger
+import threading
 import safe_socket
 
 from lottery import Lottery, Bet
@@ -59,10 +60,12 @@ def unpack_message(client_socket: socket.socket) -> (int, int, int, bytes):
     return opcode, batches, agency_id, message_payload     
 
 class Server:
-    def __init__(self, server_host: str, server_port: int, storage_path: str) -> None:
+    def __init__(self, server_host: str, server_port: int, storage_path: str, agency_quorum_min: int) -> None:
         self.server_host = server_host
         self.server_port = server_port
         self.lottery = Lottery(storage_path)
+        self.lottery_lock = threading.Lock()
+        self.agency_quorum_min = threading.Barrier(agency_quorum_min)
 
     def _store_message(self, batch_size: int, agency_id: str, message: bytes):
         batches = message.strip().split(b'\n')
@@ -70,13 +73,18 @@ class Server:
         for batch in batches:
             i += 1
             bet = to_bet(agency_id, batch)
-            self.lottery.store_bets([bet])
+
+            with self.lottery_lock:
+                self.lottery.store_bets([bet])
 
         if i != batch_size:
             raise ValueError(f"Batch size mismatch: expected {batch_size}, got {i}")
 
     def _send_lottery_winners(self, client_socket: socket.socket, agency_id: int):
-        for bet in self.lottery.load_bets():
+        with self.lottery_lock:
+            bets = self.lottery.load_bets()
+        
+        for bet in bets:
             if self.lottery.has_won(bet) and bet.agency_id == agency_id:
                 csv = to_csv(bet)
                 packet = pack_message(_OPCODE_DATA, agency_id, csv)
@@ -107,6 +115,7 @@ class Server:
                 message_amount += 1
                 self._store_message(batch_size, agency_id, client_message)
 
+            self.agency_quorum_min.wait()
             self._send_lottery_winners(client_socket, agency_id)
         except Exception as e:
             logger.error(action, logger.LogResult.fail, "messages-amount", message_amount)
@@ -129,4 +138,5 @@ class Server:
                     raise e
                 logger.info(action, logger.LogResult.success)
 
-                self._handle_client(client_socket)
+                thread = threading.Thread(target=self._handle_client, args=(client_socket,))
+                thread.start()
