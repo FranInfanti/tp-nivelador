@@ -7,7 +7,6 @@ import (
 	"os"
 	"bufio"
 	"errors"
-	"strconv"
 
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/logger"
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/safe_socket"
@@ -18,8 +17,7 @@ const CONNECTION_ATTEMPS_DELAY_MS = 1000
 
 const HEADER_SIZE = 5
 const PAYLOAD_SIZE = 65535
-
-const COLUMNS = 5
+const LINE_SIZE = 256
 
 const (
 	OPCODE_DATA	uint8 = 1
@@ -29,15 +27,16 @@ const (
 type ClientConfig struct {
 	ServerHost string
 	ServerPort string
-	BatchSize  string
-	AgencyId   string
+	BatchSize  uint8
+	AgencyId   uint8
 	InputFile  string
 	OutputFile string
 }
 
 type Client struct {
-	conn   net.Conn
-	config ClientConfig
+	conn     net.Conn
+	config   ClientConfig
+	sendBuff []byte
 }
 
 func NewClient(config ClientConfig) (*Client, error) {
@@ -47,11 +46,15 @@ func NewClient(config ClientConfig) (*Client, error) {
 		return nil, err
 	}
 
-	client := &Client{conn: conn, config: config}
+	client := &Client{
+		conn: conn, 
+		config: config,
+		sendBuff: make([]byte, HEADER_SIZE + PAYLOAD_SIZE),
+	}
 	return client, nil
 }
 
-func PackMessage(opcode uint8, batches uint8, agencyId string, payload []byte) ([]byte, error) {
+func PackMessage(client *Client, opcode uint8, batches uint8, payload []byte) ([]byte, error) {
 	if opcode != OPCODE_DATA && opcode != OPCODE_EOF {
 		return nil, errors.New("Opcode must exists")
 	}
@@ -61,18 +64,13 @@ func PackMessage(opcode uint8, batches uint8, agencyId string, payload []byte) (
 		return nil, errors.New("Payload must be lower or equal than 255")
 	}
 
-	agencyIdInt, err := strconv.Atoi(agencyId)
-	if err != nil || agencyIdInt < 0 || agencyIdInt > 255 {
-		return nil, errors.New("AgencyId must be an integer between 0 and 255")
-	}
+	packet := client.sendBuff[:HEADER_SIZE + length]
 
-	packet := make([]byte, HEADER_SIZE + length)
-
-	packet[0] = byte(opcode)
-	packet[1] = byte(batches)
+	packet[0] = opcode
+	packet[1] = batches
 	packet[2] = byte(length >> 8) // save the 8 upper bits in 1 byte
 	packet[3] = byte(length) // save the 8 lower bits in 1 byte, byte() ignores the 8 upper bits
-	packet[4] = byte(agencyIdInt)
+	packet[4] = client.config.AgencyId
 	copy(packet[HEADER_SIZE:], payload)
 
 	return packet, nil
@@ -103,7 +101,7 @@ func MakeBatch(batch []byte, payload []byte) ([]byte) {
 }
 
 func SendMessage(client *Client, opcode uint8, batches uint8, message []byte) error {
-	packet, err := PackMessage(opcode, batches, client.config.AgencyId, message)
+	packet, err := PackMessage(client, opcode, batches, message)
 	if err != nil {
 		return err
 	}
@@ -138,14 +136,12 @@ func connectToServer(host, port string) (net.Conn, error) {
 
 func readAndSendLotteryPlayers(client *Client, scanner *bufio.Scanner) error {
 	const mainAction = "send-lottery-players"
-	
-	batchSize, err := strconv.Atoi(client.config.BatchSize)
-	if err != nil {
-		return errors.New("Invalid batch size configuration")
-	}
-	
+
 	messageId := 0
-	batch, inBatch := []byte{}, 0
+	inBatch := 0
+	batchSize := int(client.config.BatchSize)
+	batch := make([]byte, 0, batchSize * LINE_SIZE)
+
 	for scanner.Scan() {
 		batch = MakeBatch(batch, scanner.Bytes())
 		inBatch++
@@ -163,7 +159,8 @@ func readAndSendLotteryPlayers(client *Client, scanner *bufio.Scanner) error {
 		}
 
 		messageId++
-		batch, inBatch = []byte{}, 0
+		inBatch = 0
+		batch = batch[:0]
 	}
 
 	if inBatch > 0 {
@@ -208,7 +205,7 @@ func sendLotteryPlayers(client *Client) error {
 
 	file, err := os.Open(client.config.InputFile)
 	if err != nil {
-		logger.Error("open-file", logger.Fail, "agency-id", client.config.AgencyId, "error", err)
+		logger.Error(mainAction, logger.Fail, "agency-id", client.config.AgencyId, "error", err)
 		return err
 	}
 	defer file.Close()
@@ -216,7 +213,7 @@ func sendLotteryPlayers(client *Client) error {
 	logger.Info(mainAction, logger.InProgress, "agency-id", client.config.AgencyId)
 
 	if err := readAndSendLotteryPlayers(client, bufio.NewScanner(file)); err != nil {
-		logger.Error("read-file", logger.Fail, err.Error())
+		logger.Error(mainAction, logger.Fail, err.Error())
 		return err
 	}
 

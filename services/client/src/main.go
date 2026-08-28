@@ -4,6 +4,8 @@ import (
 	"errors"
 	"os"
 
+	"strconv"
+
 	client "github.com/7574-sistemas-distribuidos/tp-nivelador/src/client"
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/logger"
 )
@@ -12,6 +14,11 @@ func loadConfig() (client.ClientConfig, error) {
 	agencyId := os.Getenv("AGENCY_ID")
 	if agencyId == "" {
 		return client.ClientConfig{}, errors.New("AGENCY_ID environment variable is required")
+	}
+
+	agencyIdInt, err := strconv.Atoi(agencyId)
+	if err != nil || agencyIdInt < 0 || agencyIdInt > 255 {
+		return client.ClientConfig{}, errors.New("AGENCY_ID must be an integer between 0 and 255")
 	}
 
 	serverHost := os.Getenv("SERVER_HOST")
@@ -39,11 +46,16 @@ func loadConfig() (client.ClientConfig, error) {
 		return client.ClientConfig{}, errors.New("BATCH_SIZE environment variable is required")
 	}	
 
+	batchSizeInt, err := strconv.Atoi(batchSize)
+	if err != nil || batchSizeInt < 0 || batchSizeInt > 255 {
+		return client.ClientConfig{}, errors.New("BATCH_SIZE must be an integer between 0 and 255")
+	}
+
 	return client.ClientConfig{
 		ServerHost: serverHost,
 		ServerPort: serverPort,
-		BatchSize:  batchSize,
-		AgencyId:   agencyId,
+		BatchSize:  uint8(batchSizeInt),
+		AgencyId:   uint8(agencyIdInt),
 		InputFile:  inputFile,
 		OutputFile: outputFile,
 	}, nil
