@@ -65,7 +65,8 @@ class Server:
         self.server_port = server_port
         self.lottery = Lottery(storage_path)
         self.lottery_lock = threading.Lock()
-        self.agency_quorum_min = threading.Barrier(agency_quorum_min)
+        self.condvar = threading.Condition()
+        self.agency_quorum_min = agency_quorum_min
 
     def _store_message(self, batch_size: int, agency_id: str, message: bytes):
         batches = message.strip().split(b'\n')
@@ -94,6 +95,15 @@ class Server:
         packet = pack_message(_OPCODE_EOF, agency_id, str())
         safe_socket.send_all(client_socket, packet)
 
+    def _wait_for_quorum(self):
+        with self.condvar:
+            self.agency_quorum_min -= 1
+
+            while self.agency_quorum_min > 0:
+                self.condvar.wait()
+
+        self.condvar.notify_all()
+
     def _handle_client(self, client_socket: socket.socket):
         action = "handle-client"
         message_amount = 0
@@ -115,7 +125,7 @@ class Server:
                 message_amount += 1
                 self._store_message(batch_size, agency_id, client_message)
 
-            self.agency_quorum_min.wait()
+            self._wait_for_quorum()
             self._send_lottery_winners(client_socket, agency_id)
         except Exception as e:
             logger.error(action, logger.LogResult.fail, "messages-amount", message_amount)
