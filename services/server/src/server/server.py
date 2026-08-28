@@ -1,11 +1,16 @@
+import sys
 import socket
+import signal
 import logger
 import threading
 import safe_socket
 
+from types import FrameType
+from typing import NoReturn
 from lottery import Lottery, Bet
 
 _ENCODING = "utf-8"
+_TIMEOUT = 5.0
 
 _HEADER_SIZE = 5
 _PAYLOAD_SIZE = 65535
@@ -63,20 +68,55 @@ class Server:
     def __init__(self, server_host: str, server_port: int, storage_path: str, agency_quorum_min: int) -> None:
         self.server_host = server_host
         self.server_port = server_port
+
+        self.conns = {}
+        self.conns_lock = threading.Lock()
+        
         self.lottery = Lottery(storage_path)
         self.lottery_lock = threading.Lock()
-        self.condvar = threading.Condition()
+        
         self.agency_quorum_min = agency_quorum_min
+        self.running = True
+        self.condvar = threading.Condition()
+
+        signal.signal(signal.SIGTERM, self._sigterm_handler)
+
+    def _sigterm_handler(self, _: int, frame: FrameType | None) -> NoReturn:
+        action = "sigterm-received"
+        logger.info(action, logger.LogResult.in_progress)
+        
+        self.running = False
+        
+        with self.condvar:
+            self.condvar.notify_all()
+        
+        with self.conns_lock:
+            for client_socket in list(self.conns.values()):
+                # if the socket is already closed, there is no issue
+                try: 
+                    client_socket.shutdown(socket.SHUT_RDWR)
+                    client_socket.close()
+                except Exception:
+                    pass
+            
+            threads = list(self.conns.keys())
+
+        for thread in threads:
+            thread.join(timeout=_TIMEOUT)
+        
+        logger.info(action, logger.LogResult.success)
+        sys.exit(0)
 
     def _store_message(self, batch_size: int, agency_id: str, message: bytes):
         batches = message.strip().split(b'\n')
+        bets = []
         i = 0
         for batch in batches:
             i += 1
-            bet = to_bet(agency_id, batch)
+            bets.append(to_bet(agency_id, batch))
 
-            with self.lottery_lock:
-                self.lottery.store_bets([bet])
+        with self.lottery_lock:
+            self.lottery.store_bets(bets)
 
         if i != batch_size:
             raise ValueError(f"Batch size mismatch: expected {batch_size}, got {i}")
@@ -99,10 +139,10 @@ class Server:
         with self.condvar:
             self.agency_quorum_min -= 1
 
-            while self.agency_quorum_min > 0:
+            while self.agency_quorum_min > 0 and self.running:
                 self.condvar.wait()
 
-        self.condvar.notify_all()
+            self.condvar.notify_all()
 
     def _handle_client(self, client_socket: socket.socket):
         action = "handle-client"
@@ -110,7 +150,7 @@ class Server:
         agency_id = None
         try:
             logger.info(action, logger.LogResult.in_progress)
-            while True:
+            while self.running:
                 opcode, batch_size, agency_id, client_message = unpack_message(client_socket)
 
                 # the conn ended while the client was still sending data
@@ -126,13 +166,22 @@ class Server:
                 self._store_message(batch_size, agency_id, client_message)
 
             self._wait_for_quorum()
-            self._send_lottery_winners(client_socket, agency_id)
+            if self.running:
+                self._send_lottery_winners(client_socket, agency_id)
         except Exception as e:
             logger.error(action, logger.LogResult.fail, "messages-amount", message_amount)
             raise e
         finally:
             logger.info(action, logger.LogResult.success)
-            client_socket.close()
+            
+            try: 
+                client_socket.shutdown(socket.SHUT_RDWR)
+                client_socket.close()
+            except:
+                pass
+
+            with self.conns_lock:
+                self.conns.pop(threading.current_thread(), None)
 
     def run(self):
         action = "accept-connection"
@@ -149,4 +198,8 @@ class Server:
                 logger.info(action, logger.LogResult.success)
 
                 thread = threading.Thread(target=self._handle_client, args=(client_socket,))
+                
+                with self.conns_lock:
+                    self.conns[thread] = client_socket
+                
                 thread.start()
