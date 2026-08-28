@@ -168,12 +168,12 @@ class Server:
             self._wait_for_quorum()
             if self.running:
                 self._send_lottery_winners(client_socket, agency_id)
+            
+            logger.info(action, logger.LogResult.success)
         except Exception as e:
             logger.error(action, logger.LogResult.fail, "messages-amount", message_amount)
             raise e
         finally:
-            logger.info(action, logger.LogResult.success)
-            
             try: 
                 client_socket.shutdown(socket.SHUT_RDWR)
                 client_socket.close()
