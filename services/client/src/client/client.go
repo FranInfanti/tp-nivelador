@@ -7,6 +7,9 @@ import (
 	"os"
 	"bufio"
 	"errors"
+	"syscall"
+	"context"
+	"os/signal"
 
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/logger"
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/safe_socket"
@@ -225,7 +228,8 @@ func uploadData(client *Client) error {
 
 	file, err := os.Open(client.config.InputFile)
 	if err != nil {
-		logger.Error(mainAction, logger.Fail, "agency-id", client.config.AgencyId, "error", err)
+		messageArgs := []any{"agency-id", client.config.AgencyId, "error", err}
+		logger.Error(mainAction, logger.Fail, messageArgs...)
 		return err
 	}
 	defer file.Close()
@@ -279,18 +283,39 @@ func recvData(client *Client) error {
 func (client *Client) Run() error {
 	defer client.conn.Close()
 	
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		// wait for SIGTERM signal and end the conn...
+		<-ctx.Done()
+		client.conn.Close()
+	}()
+
 	// send the lottery players
 	if err := uploadData(client); err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+
 		return err
 	}
 
 	// inform the server there is no more lottery players
 	if err := sendEOF(client); err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+
 		return err
 	}
 
 	// await for lottery players winners
 	if err := recvData(client); err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+
 		return err
 	}
 
