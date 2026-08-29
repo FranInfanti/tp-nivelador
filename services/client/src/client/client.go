@@ -46,7 +46,6 @@ type Client struct {
 func NewClient(config ClientConfig) (*Client, error) {
 	conn, err := connectToServer(config.ServerHost, config.ServerPort)
 	if err != nil {
-		logger.Warn("connect-to-server", logger.Fail)
 		return nil, err
 	}
 
@@ -119,6 +118,7 @@ func SendMessage(client *Client, opcode uint8, batches uint8, message []byte) er
 
 func connectToServer(host, port string) (net.Conn, error) {
 	const action = "connect-to-server"
+
 	var err error
 	var conn net.Conn
 
@@ -157,7 +157,7 @@ func uploadBatch(client *Client, inBatch uint8, batch []byte) error {
 }
 
 func uploadLotteryPlayers(client *Client, scanner *bufio.Scanner) error {
-	const mainAction = "upload-lottery-players"
+	const action = "upload-lottery-players"
 	
 	messageId := 0
 	inBatch := 0
@@ -168,12 +168,12 @@ func uploadLotteryPlayers(client *Client, scanner *bufio.Scanner) error {
 		inBatch++
 
 		if inBatch == batchSize {
-			messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId, "batches", inBatch}
-			logger.Info(mainAction, logger.InProgress, messageArgs...)
-
 			if err := uploadBatch(client, uint8(inBatch), batch); err != nil {
 				return err
 			}
+
+			messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId, "batches", inBatch}
+			logger.Info(action, logger.Success, messageArgs...)
 	
 			messageId++
 			inBatch = 0
@@ -182,22 +182,21 @@ func uploadLotteryPlayers(client *Client, scanner *bufio.Scanner) error {
 	}
 
 	if inBatch > 0 {
-		messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId, "batches", inBatch}
-		logger.Info(mainAction, logger.InProgress, messageArgs...)
-
 		if err := uploadBatch(client, uint8(inBatch), batch); err != nil {
 			return err
 		}
+
+		messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId, "batches", inBatch}
+		logger.Info(action, logger.Success, messageArgs...)
 	}
 
 	return scanner.Err()
 }
 
 func downloadLotteryWinners(client *Client, writeFile *os.File) error {
-	const mainAction = "store-lottery-winners"
+	const action = "download-lottery-winners"
 
 	messageId := 0
-
 	for {
 		opcode, _, message, err := UnpackMessage(client)
 		if err != nil {
@@ -209,74 +208,62 @@ func downloadLotteryWinners(client *Client, writeFile *os.File) error {
 			break
 		}
 
-		messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
-		logger.Info(mainAction, logger.InProgress, messageArgs...)
-
+		messageId++
 		message = append(message, '\n')
-
 		_, err = writeFile.Write(message)
 		if err != nil {
 			return err
 		}
+
+		messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
+		logger.Info(action, logger.Success, messageArgs...)
 	}
 
 	return nil
 }
 
-func uploadData(client *Client) error {
-	const mainAction = "send-lottery-players"
+func sendData(client *Client) error {
+	logger.Info("send-data", logger.InProgress)
 
 	file, err := os.Open(client.config.InputFile)
 	if err != nil {
-		messageArgs := []any{"agency-id", client.config.AgencyId, "error", err}
-		logger.Error(mainAction, logger.Fail, messageArgs...)
 		return err
 	}
 	defer file.Close()
 
-	logger.Info(mainAction, logger.InProgress, "agency-id", client.config.AgencyId)
-
 	if err := uploadLotteryPlayers(client, bufio.NewScanner(file)); err != nil {
-		logger.Error(mainAction, logger.Fail, err.Error())
 		return err
 	}
 
-	logger.Info(mainAction, logger.Success, "agency-id", client.config.AgencyId)
+	logger.Info("send-data", logger.Success)
 	return nil
 }
 
 func sendEOF(client *Client) error {
-	const mainAction = "send-eof"
-	
-	logger.Info(mainAction, logger.InProgress, "agency-id", client.config.AgencyId)
+	logger.Info("send-eof", logger.InProgress)
 
 	if err := SendMessage(client, OPCODE_EOF, 0, []byte{}); err != nil {
-		logger.Error("send-message", logger.Fail)
 		return err
 	}
 
-	logger.Info(mainAction, logger.Success, "agency-id", client.config.AgencyId)
+	logger.Info("send-eof", logger.Success)
 	return nil
 }
 
 func recvData(client *Client) error {
-	const mainAction = "recv-lottery-winners"
+	logger.Info("recv-data", logger.InProgress)
 
 	file, err := os.OpenFile(client.config.OutputFile, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
 	if err != nil {
-		logger.Error("open-file", logger.Fail, "agency-id", client.config.AgencyId, "error", err)
 		return err
 	}
 	defer file.Close()
 
-	logger.Info(mainAction, logger.InProgress, "agency-id", client.config.AgencyId)
-
 	if err := downloadLotteryWinners(client, file); err != nil {
-		logger.Error(mainAction, logger.Fail, "agency-id", client.config.AgencyId)
 		return err
 	}
 
-	logger.Info(mainAction, logger.Success, "agency-id", client.config.AgencyId)
+	logger.Info("recv-data", logger.Success)
 	return nil
 }
 
@@ -289,33 +276,34 @@ func (client *Client) Run() error {
 	go func() {
 		// wait for SIGTERM signal and end the conn...
 		<-ctx.Done()
+		logger.Warn("sigterm-signal", logger.InProgress)
 		client.conn.Close()
 	}()
 
-	// send the lottery players
-	if err := uploadData(client); err != nil {
+	if err := sendData(client); err != nil {
 		if ctx.Err() != nil {
 			return nil
 		}
 
+		logger.Error("send-data", logger.Fail, "err", err)
 		return err
 	}
 
-	// inform the server there is no more lottery players
 	if err := sendEOF(client); err != nil {
 		if ctx.Err() != nil {
 			return nil
 		}
 
+		logger.Error("send-eof", logger.Fail, "err", err)
 		return err
 	}
 
-	// await for lottery players winners
 	if err := recvData(client); err != nil {
 		if ctx.Err() != nil {
 			return nil
 		}
 
+		logger.Error("recv-data", logger.Fail, "err", err)
 		return err
 	}
 
