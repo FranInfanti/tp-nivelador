@@ -1,4 +1,4 @@
-import sys
+import time
 import socket
 import signal
 import logger
@@ -10,12 +10,13 @@ from typing import NoReturn
 from lottery import Lottery, Bet
 
 _ENCODING = "utf-8"
-_TIMEOUT = 5.0
+_TIMEOUT = 4.0
 
 _HEADER_SIZE = 5
 _PAYLOAD_SIZE = 65535
 
-_OPCODE_DATA = 1
+_OPCODE_DATA = 2
+_OPCODE_ACK = 1
 _OPCODE_EOF = 0
 
 _COLUMNS = 5
@@ -36,7 +37,7 @@ def to_csv(bet: Bet) -> str:
     return f"{bet.first_name},{bet.last_name},{bet.document},{bet.birthdate},{bet.number}"
 
 def pack_message(opcode: int, agency_id: int, payload: str) -> bytes:
-    if opcode not in [_OPCODE_DATA, _OPCODE_EOF]:
+    if opcode not in [_OPCODE_DATA, _OPCODE_ACK, _OPCODE_EOF]:
         raise ValueError(f"Opcode must be valid")
 
     payload_bytes = payload.encode(_ENCODING)
@@ -68,6 +69,7 @@ class Server:
     def __init__(self, server_host: str, server_port: int, storage_path: str, agency_quorum_min: int) -> None:
         self.server_host = server_host
         self.server_port = server_port
+        self.server_socket = None
 
         self.conns = {}
         self.conns_lock = threading.Lock()
@@ -86,26 +88,42 @@ class Server:
         logger.info(action, logger.LogResult.in_progress)
         
         self.running = False
+        deadline = time.time() + _TIMEOUT
         
+        # wake up the threads waiting for quorum...
         with self.condvar:
             self.condvar.notify_all()
         
         with self.conns_lock:
             for client_socket in list(self.conns.values()):
-                # if the socket is already closed, there is no issue
+                # wake up the threads waiting for messages... 
                 try: 
                     client_socket.shutdown(socket.SHUT_RDWR)
-                    client_socket.close()
                 except Exception:
                     pass
-            
             threads = list(self.conns.keys())
 
         for thread in threads:
-            thread.join(timeout=_TIMEOUT)
-        
+            time_left = deadline - time.time()
+            if time_left <= 0:
+                break
+            # wait for the threads to finish...
+            thread.join(timeout=time_left)
+
+        with self.conns_lock:
+            for client_socket in list(self.conns.values()):
+                try:
+                    client_socket.close()
+                except Exception:
+                    pass
+
+        if self.server_socket:
+            try:
+                self.server_socket.close()
+            except Exception:
+                pass
+
         logger.info(action, logger.LogResult.success)
-        sys.exit(0)
 
     def _store_message(self, batch_size: int, agency_id: str, message: bytes):
         batches = message.strip().split(b'\n')
@@ -120,6 +138,10 @@ class Server:
 
         if i != batch_size:
             raise ValueError(f"Batch size mismatch: expected {batch_size}, got {i}")
+
+    def _send_ack(self, client_socket: socket.socket, agency_id: str):
+        packet = pack_message(_OPCODE_ACK, agency_id, str())
+        safe_socket.send_all(client_socket, packet)
 
     def _send_lottery_winners(self, client_socket: socket.socket, agency_id: int):
         with self.lottery_lock:
@@ -144,6 +166,15 @@ class Server:
 
             self.condvar.notify_all()
 
+    def _close_conn(self, client_socket: socket.socket):
+        with self.conns_lock:
+            try:
+                client_socket.close()
+            except Exception:
+                pass
+
+            self.conns.pop(threading.current_thread(), None)
+
     def _handle_client(self, client_socket: socket.socket):
         action = "handle-client"
         message_amount = 0
@@ -155,51 +186,46 @@ class Server:
 
                 # the conn ended while the client was still sending data
                 if opcode is None:
-                    logger.error(action, logger.LogResult.fail, "messages-amount", message_amount)
+                    logger.error(action, logger.LogResult.fail, "ident", threading.get_ident(), "messages-amount", message_amount)
                     return
                 # the client has no more data to send
                 elif opcode == _OPCODE_EOF:
-                    logger.info(action, logger.LogResult.success, "messages-amount", message_amount)
+                    logger.info(action, logger.LogResult.success, "ident", threading.get_ident(), "messages-amount", message_amount)
                     break
 
                 message_amount += 1
                 self._store_message(batch_size, agency_id, client_message)
-
+                self._send_ack(client_socket, agency_id)
+       
             self._wait_for_quorum()
             if self.running:
                 self._send_lottery_winners(client_socket, agency_id)
             
             logger.info(action, logger.LogResult.success)
         except Exception as e:
-            logger.error(action, logger.LogResult.fail, "messages-amount", message_amount)
-            raise e
+            if self.running:
+                logger.error(action, logger.LogResult.fail, "ident", threading.get_ident(), "messages-amount", message_amount, "err", e)
         finally:
-            try: 
-                client_socket.shutdown(socket.SHUT_RDWR)
-                client_socket.close()
-            except:
-                pass
-
-            with self.conns_lock:
-                self.conns.pop(threading.current_thread(), None)
+            self._close_conn(client_socket)
 
     def run(self):
         action = "accept-connection"
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
+            self.server_socket = server_socket
             server_socket.bind((self.server_host, self.server_port))
             server_socket.listen()
-            while True:
+            while self.running:
                 try:
                     logger.info(action, logger.LogResult.in_progress)
                     client_socket, _ = server_socket.accept()
                 except Exception as e:
                     logger.error(action, logger.LogResult.fail)
+                    if not self.running:
+                        break
                     raise e
                 logger.info(action, logger.LogResult.success)
 
                 thread = threading.Thread(target=self._handle_client, args=(client_socket,))
-                
                 with self.conns_lock:
                     self.conns[thread] = client_socket
-                
                 thread.start()
