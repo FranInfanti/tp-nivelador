@@ -103,7 +103,7 @@ func MakeBatch(batch []byte, payload []byte) ([]byte) {
 	return batch
 }
 
-func SendMessage(client *Client, opcode uint8, batches uint8, message []byte) error {
+func sendMessage(client *Client, opcode uint8, batches uint8, message []byte) error {
 	packet, err := PackMessage(client, opcode, batches, message)
 	if err != nil {
 		return err
@@ -139,7 +139,7 @@ func connectToServer(host, port string) (net.Conn, error) {
 }
 
 func uploadBatch(client *Client, inBatch uint8, batch []byte) error {
-	if err := SendMessage(client, OPCODE_DATA, inBatch, batch); err != nil {
+	if err := sendMessage(client, OPCODE_DATA, inBatch, batch); err != nil {
 		return err
 	}
 
@@ -242,7 +242,7 @@ func sendData(client *Client) error {
 func sendEOF(client *Client) error {
 	logger.Info("send-eof", logger.InProgress)
 
-	if err := SendMessage(client, OPCODE_EOF, 0, []byte{}); err != nil {
+	if err := sendMessage(client, OPCODE_EOF, 0, []byte{}); err != nil {
 		return err
 	}
 
