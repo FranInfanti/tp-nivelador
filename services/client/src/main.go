@@ -1,9 +1,8 @@
 package main
 
 import (
-	"errors"
 	"os"
-
+	"errors"
 	"strconv"
 
 	client "github.com/7574-sistemas-distribuidos/tp-nivelador/src/client"
@@ -54,10 +53,10 @@ func loadConfig() (client.ClientConfig, error) {
 	return client.ClientConfig{
 		ServerHost: serverHost,
 		ServerPort: serverPort,
-		BatchSize:  uint8(batchSizeInt),
-		AgencyId:   uint8(agencyIdInt),
 		InputFile:  inputFile,
 		OutputFile: outputFile,
+		BatchSize:  uint8(batchSizeInt),
+		AgencyId:   uint8(agencyIdInt),
 	}, nil
 }
 

@@ -1,15 +1,16 @@
 package client
 
 import (
+	"os"
 	"net"
 	"time"
-
-	"os"
 	"bufio"
 	"errors"
 	"syscall"
 	"context"
 	"os/signal"
+
+	packet "github.com/7574-sistemas-distribuidos/tp-nivelador/src/utils"
 
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/logger"
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/safe_socket"
@@ -18,29 +19,21 @@ import (
 const CONNECTION_ATTEMPTS_MAX = 3
 const CONNECTION_ATTEMPS_DELAY_MS = 1000
 
-const HEADER_SIZE = 5
-const PAYLOAD_SIZE = 65535
 const LINE_SIZE = 256
-
-const (
-	OPCODE_DATA	uint8 = 2
-	OPCODE_ACK  uint8 = 1
-	OPCODE_EOF	uint8 = 0
-)
 
 type ClientConfig struct {
 	ServerHost string
 	ServerPort string
-	BatchSize  uint8
-	AgencyId   uint8
 	InputFile  string
 	OutputFile string
+	BatchSize  uint8
+	AgencyId   uint8
 }
 
 type Client struct {
-	conn     net.Conn
-	config   ClientConfig
-	sendBuff []byte
+	conn   net.Conn
+	config ClientConfig
+	packet *packet.Packet
 }
 
 func NewClient(config ClientConfig) (*Client, error) {
@@ -52,68 +45,9 @@ func NewClient(config ClientConfig) (*Client, error) {
 	client := &Client{
 		conn: conn, 
 		config: config,
-		sendBuff: make([]byte, HEADER_SIZE + PAYLOAD_SIZE),
+		packet: packet.NewPacket(),
 	}
 	return client, nil
-}
-
-func PackMessage(client *Client, opcode uint8, batches uint8, payload []byte) ([]byte, error) {
-	if opcode != OPCODE_DATA && opcode != OPCODE_EOF {
-		return nil, errors.New("Opcode must exists")
-	}
-	
-	length := len(payload)
-	if length > PAYLOAD_SIZE {
-		return nil, errors.New("Payload must be lower or equal than 255")
-	}
-
-	packet := client.sendBuff[:HEADER_SIZE + length]
-
-	packet[0] = opcode
-	packet[1] = batches
-	packet[2] = byte(length >> 8) // save the 8 upper bits in 1 byte
-	packet[3] = byte(length) // save the 8 lower bits in 1 byte, byte() ignores the 8 upper bits
-	packet[4] = client.config.AgencyId
-	copy(packet[HEADER_SIZE:], payload)
-
-	return packet, nil
-}
-
-func UnpackMessage(client *Client) (uint8, uint8, []byte, error) {
-	header, err := safe_socket.RecvAll(client.conn, HEADER_SIZE)
-	if err != nil {
-		return 0, 0, nil, err
-	}
-
-	opcode := uint8(header[0])
-	batches := uint8(header[1])
-	// we take the 8 upper bits and transform it into a 16 bit number and then apply OR with the 8 lower bits
-	length := (int(header[2]) << 8) | int(header[3])
-	payload, err := safe_socket.RecvAll(client.conn, length)
-	if err != nil {
-		return 0, 0, nil, err
-	}
-
-	return opcode, batches, payload, nil
-}
-
-func MakeBatch(batch []byte, payload []byte) ([]byte) {
-	batch = append(batch, payload...)
-	batch = append(batch, '\n')
-	return batch
-}
-
-func sendMessage(client *Client, opcode uint8, batches uint8, message []byte) error {
-	packet, err := PackMessage(client, opcode, batches, message)
-	if err != nil {
-		return err
-	}
-
-	if err := safe_socket.SendAll(client.conn, packet); err != nil {
-		return err
-	}
-
-	return nil
 }
 
 func connectToServer(host, port string) (net.Conn, error) {
@@ -138,18 +72,30 @@ func connectToServer(host, port string) (net.Conn, error) {
 	return conn, err
 }
 
-func uploadBatch(client *Client, inBatch uint8, batch []byte) error {
-	if err := sendMessage(client, OPCODE_DATA, inBatch, batch); err != nil {
-		return err
-	}
-
-	// wait for ack
-	opcode, _, _, err := UnpackMessage(client)
+func sendMessage(client *Client, opcode uint8, batches uint8, message []byte) error {
+	err := packet.PackMessage(client.packet, opcode, batches, client.config.AgencyId, message)
 	if err != nil {
 		return err
 	}
 
-	if opcode != OPCODE_ACK {
+	if err := safe_socket.SendAll(client.conn, client.packet.ToBytes()); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func uploadBatch(client *Client, inBatch uint8, batch []byte) error {
+	if err := sendMessage(client, packet.OPCODE_DATA, inBatch, batch); err != nil {
+		return err
+	}
+
+	// wait for ack
+	if err := packet.UnpackMessage(client.packet, client.conn); err != nil {
+		return err
+	}
+
+	if client.packet.Opcode != packet.OPCODE_ACK {
 		return errors.New("Expected ACK from server")
 	}
 
@@ -164,7 +110,8 @@ func uploadLotteryPlayers(client *Client, scanner *bufio.Scanner) error {
 	batchSize := int(client.config.BatchSize)
 	batch := make([]byte, 0, batchSize * LINE_SIZE)
 	for scanner.Scan() {
-		batch = MakeBatch(batch, scanner.Bytes())
+		batch = append(batch, scanner.Bytes()...)
+		batch = append(batch, '\n')
 		inBatch++
 
 		if inBatch == batchSize {
@@ -194,32 +141,35 @@ func uploadLotteryPlayers(client *Client, scanner *bufio.Scanner) error {
 }
 
 func downloadLotteryWinners(client *Client, writeFile *os.File) error {
-	const action = "download-lottery-winners"
+    const action = "download-lottery-winners"
 
-	messageId := 0
-	for {
-		opcode, _, message, err := UnpackMessage(client)
-		if err != nil {
-			return err
-		}
+    messageId := 0
+    for {
+        if err := packet.UnpackMessage(client.packet, client.conn); err != nil {
+            return err
+        }
 
-		// this is not an error, cause it means there is no more winners
-		if opcode == OPCODE_EOF {
-			break
-		}
-
+        if client.packet.Opcode == packet.OPCODE_EOF {
+            break
+        }
+        
 		messageId++
-		message = append(message, '\n')
-		_, err = writeFile.Write(message)
-		if err != nil {
+        message := append(client.packet.Payload(), '\n')
+        
+		_, err := writeFile.Write(message)
+        if err != nil {
+            return err
+        }
+
+		if err := sendMessage(client, packet.OPCODE_ACK, 0, []byte{}); err != nil {
 			return err
 		}
-
+        
 		messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
-		logger.Info(action, logger.Success, messageArgs...)
-	}
+        logger.Info(action, logger.Success, messageArgs...)
+    }
 
-	return nil
+    return nil
 }
 
 func sendData(client *Client) error {
@@ -242,7 +192,7 @@ func sendData(client *Client) error {
 func sendEOF(client *Client) error {
 	logger.Info("send-eof", logger.InProgress)
 
-	if err := sendMessage(client, OPCODE_EOF, 0, []byte{}); err != nil {
+	if err := sendMessage(client, packet.OPCODE_EOF, 0, []byte{}); err != nil {
 		return err
 	}
 
