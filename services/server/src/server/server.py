@@ -139,7 +139,7 @@ class Server:
         if i != batch_size:
             raise ValueError(f"Batch size mismatch: expected {batch_size}, got {i}")
 
-    def _send_ack(self, client_socket: socket.socket, agency_id: str):
+    def _send_ack(self, client_socket: socket.socket, agency_id: int):
         packet = pack_message(_OPCODE_ACK, agency_id, str())
         safe_socket.send_all(client_socket, packet)
 
@@ -156,6 +156,10 @@ class Server:
                 csv = to_csv(bet)
                 packet = pack_message(_OPCODE_DATA, agency_id, csv)
                 safe_socket.send_all(client_socket, packet)
+
+                opcode, _, _, _ = unpack_message(client_socket)
+                if opcode != _OPCODE_ACK:
+                    raise ValueError("Expected ACK")
 
         # there are no more winners then send OEF
         packet = pack_message(_OPCODE_EOF, agency_id, str())
