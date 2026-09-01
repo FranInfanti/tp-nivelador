@@ -8,19 +8,9 @@ import safe_socket
 from types import FrameType
 from typing import NoReturn
 from lottery import Lottery, Bet
-from utils import to_bet, to_csv, Packet
+from utils import to_bet, to_csv, Packet, OPCODE_ACK, OPCODE_DATA, OPCODE_EOF
 
-_ENCODING = "utf-8"
 _TIMEOUT = 4.0
-
-_HEADER_SIZE = 5
-_PAYLOAD_SIZE = 65535
-
-_OPCODE_DATA = 2
-_OPCODE_ACK = 1
-_OPCODE_EOF = 0
-
-_COLUMNS = 5
 
 class Server:
     def __init__(self, server_host: str, server_port: int, storage_path: str, agency_quorum_min: int) -> None:
@@ -83,7 +73,7 @@ class Server:
         logger.info(action, logger.LogResult.success)
 
     def _store_message(self, packet: Packet):
-        batches = packet.payload().strip().split(b'\n')
+        batches = packet.payload.strip().split(b'\n')
         bets = []
         i = 0
         for batch in batches:
@@ -96,14 +86,14 @@ class Server:
         if i != packet.batches:
             raise ValueError(f"Batch size mismatch: expected {packet.batches}, got {i}")
 
-    def _send_ack(self, client_socket: socket.socket, packet: Packet):
-        packet.pack_message(_OPCODE_ACK, packet.agency_id, str())
-        safe_socket.send_all(client_socket, packet.to_bytes())
+    def _send_ack(self, client_socket: socket.socket, agency_id: int):
+        ack = Packet(opcode=OPCODE_ACK, agency_id=agency_id)
+        safe_socket.send_all(client_socket, ack.to_bytes())
 
-    def _send_lottery_winners(self, client_socket: socket.socket, packet: Packet, agency_id: int):
+    def _send_lottery_winners(self, client_socket: socket.socket, agency_id: int):
         action = "send-lottery-winners"
 
-        logger.info(action, logger.LogResult.in_progress, "ident", threading.get_ident(), "agency-id", packet.agency_id)
+        logger.info(action, logger.LogResult.in_progress, "ident", threading.get_ident(), "agency-id", agency_id)
     
         with self.lottery_lock:
             bets = self.lottery.load_bets()
@@ -111,17 +101,17 @@ class Server:
         for bet in bets:
             if self.lottery.has_won(bet) and bet.agency_id == agency_id:
                 csv = to_csv(bet)
-                packet.pack_message(_OPCODE_DATA, agency_id, csv)
-                safe_socket.send_all(client_socket, packet.to_bytes())
+                data = Packet(opcode=OPCODE_DATA, agency_id=agency_id, payload=csv)
+                safe_socket.send_all(client_socket, data.to_bytes())
 
-                packet.unpack_message(client_socket)
-                if packet.opcode != _OPCODE_ACK:
+                ack = Packet.from_socket(client_socket)
+                if ack is None or ack.opcode != OPCODE_ACK:
                     raise ValueError("Expected ACK")
 
         # there are no more winners then send OEF
-        packet.pack_message(_OPCODE_EOF, agency_id, str())
-        safe_socket.send_all(client_socket, packet.to_bytes())
-        logger.info(action, logger.LogResult.success, "ident", threading.get_ident(), "agency-id", packet.agency_id)
+        eof = Packet(opcode=OPCODE_EOF, agency_id=agency_id)
+        safe_socket.send_all(client_socket, eof.to_bytes())
+        logger.info(action, logger.LogResult.success, "ident", threading.get_ident(), "agency-id", agency_id)
 
     def _wait_for_quorum(self):
         with self.condvar:
@@ -144,35 +134,35 @@ class Server:
     def _handle_client(self, client_socket: socket.socket):
         action = "handle-client"
         message_amount = 0
-        packet = Packet()
+        agency_id = None
         try:
             logger.info(action, logger.LogResult.in_progress)
             while self.running:
-                packet.unpack_message(client_socket)
-                
-                args = ["ident", threading.get_ident(), "agency-id", packet.agency_id, "messages-amount", message_amount]
+                packet = Packet.from_socket(client_socket)
 
-                # the conn ended while the client was still sending data
-                if packet.opcode is None:
-                    logger.error(action, logger.LogResult.fail, *args)
-                    return
+                if packet is None:
+                    raise ValueError("The conn ended while the client was still sending data")
+
+                agency_id = packet.agency_id
+
                 # the client has no more data to send
-                elif packet.opcode == _OPCODE_EOF:
+                if packet.opcode == OPCODE_EOF:
+                    args = ["ident", threading.get_ident(), "agency-id", agency_id, "messages-amount", message_amount]
                     logger.info(action, logger.LogResult.success, *args)
                     break
 
                 message_amount += 1
                 self._store_message(packet)
-                self._send_ack(client_socket, packet)
+                self._send_ack(client_socket, agency_id)
        
             self._wait_for_quorum()
             if self.running:
-                self._send_lottery_winners(client_socket, packet, packet.agency_id)
+                self._send_lottery_winners(client_socket, agency_id)
             
             logger.info(action, logger.LogResult.success)
         except Exception as e:
             if self.running:
-                args = ["ident", threading.get_ident(), "agency-id", packet.agency_id, "messages-amount", message_amount, "err", e]
+                args = ["ident", threading.get_ident(), "agency-id", agency_id, "messages-amount", message_amount, "err", e]
                 logger.error(action, logger.LogResult.fail, *args)
         finally:
             self._close_conn(client_socket)
