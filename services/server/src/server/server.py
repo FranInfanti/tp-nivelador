@@ -8,6 +8,7 @@ import safe_socket
 from types import FrameType
 from typing import NoReturn
 from lottery import Lottery, Bet
+from utils import to_bet, to_csv, Packet
 
 _ENCODING = "utf-8"
 _TIMEOUT = 4.0
@@ -20,50 +21,6 @@ _OPCODE_ACK = 1
 _OPCODE_EOF = 0
 
 _COLUMNS = 5
-
-def to_bet(agency_id: int, csv: bytes) -> Bet:
-    fields = csv.decode(_ENCODING).strip().split(",")
-    
-    return Bet(
-        agency_id=agency_id,
-        first_name=fields[0],
-        last_name=fields[1],
-        document=int(fields[2]),
-        birthdate=fields[3],
-        number=int(fields[4])
-    )
-
-def to_csv(bet: Bet) -> str:
-    return f"{bet.first_name},{bet.last_name},{bet.document},{bet.birthdate},{bet.number}"
-
-def pack_message(opcode: int, agency_id: int, payload: str) -> bytes:
-    if opcode not in [_OPCODE_DATA, _OPCODE_ACK, _OPCODE_EOF]:
-        raise ValueError(f"Opcode must be valid")
-
-    payload_bytes = payload.encode(_ENCODING)
-    length = len(payload_bytes)
-
-    if length > _PAYLOAD_SIZE:
-        raise ValueError(f"Payload must be lower or equal than {_PAYLOAD_SIZE}")
-    
-    length_high = (length >> 8) & 0xFF
-    length_low = length & 0xFF
-
-    return bytes([opcode, 1, length_high, length_low, agency_id]) + payload_bytes
-
-def unpack_message(client_socket: socket.socket) -> (int, int, int, bytes):
-    message_header = safe_socket.recv_all(client_socket, _HEADER_SIZE)
-    
-    if not message_header:
-        return None, None, None, None
-
-    opcode = int(message_header[0])
-    batches = int(message_header[1])
-    length = (int(message_header[2]) << 8) | int(message_header[3])
-    agency_id = int(message_header[4])
-    message_payload = safe_socket.recv_all(client_socket, length)
-
-    return opcode, batches, agency_id, message_payload     
 
 class Server:
     def __init__(self, server_host: str, server_port: int, storage_path: str, agency_quorum_min: int) -> None:
@@ -125,28 +82,28 @@ class Server:
 
         logger.info(action, logger.LogResult.success)
 
-    def _store_message(self, batch_size: int, agency_id: int, message: bytes):
-        batches = message.strip().split(b'\n')
+    def _store_message(self, packet: Packet):
+        batches = packet.payload().strip().split(b'\n')
         bets = []
         i = 0
         for batch in batches:
             i += 1
-            bets.append(to_bet(agency_id, batch))
+            bets.append(to_bet(packet.agency_id, batch))
 
         with self.lottery_lock:
             self.lottery.store_bets(bets)
 
-        if i != batch_size:
-            raise ValueError(f"Batch size mismatch: expected {batch_size}, got {i}")
+        if i != packet.batches:
+            raise ValueError(f"Batch size mismatch: expected {packet.batches}, got {i}")
 
-    def _send_ack(self, client_socket: socket.socket, agency_id: int):
-        packet = pack_message(_OPCODE_ACK, agency_id, str())
-        safe_socket.send_all(client_socket, packet)
+    def _send_ack(self, client_socket: socket.socket, packet: Packet):
+        packet.pack_message(_OPCODE_ACK, packet.agency_id, str())
+        safe_socket.send_all(client_socket, packet.to_bytes())
 
-    def _send_lottery_winners(self, client_socket: socket.socket, agency_id: int):
+    def _send_lottery_winners(self, client_socket: socket.socket, packet: Packet, agency_id: int):
         action = "send-lottery-winners"
 
-        logger.info(action, logger.LogResult.in_progress, "ident", threading.get_ident(), "agency-id", agency_id)
+        logger.info(action, logger.LogResult.in_progress, "ident", threading.get_ident(), "agency-id", packet.agency_id)
     
         with self.lottery_lock:
             bets = self.lottery.load_bets()
@@ -154,17 +111,17 @@ class Server:
         for bet in bets:
             if self.lottery.has_won(bet) and bet.agency_id == agency_id:
                 csv = to_csv(bet)
-                packet = pack_message(_OPCODE_DATA, agency_id, csv)
-                safe_socket.send_all(client_socket, packet)
+                packet.pack_message(_OPCODE_DATA, agency_id, csv)
+                safe_socket.send_all(client_socket, packet.to_bytes())
 
-                opcode, _, _, _ = unpack_message(client_socket)
-                if opcode != _OPCODE_ACK:
+                packet.unpack_message(client_socket)
+                if packet.opcode != _OPCODE_ACK:
                     raise ValueError("Expected ACK")
 
         # there are no more winners then send OEF
-        packet = pack_message(_OPCODE_EOF, agency_id, str())
-        safe_socket.send_all(client_socket, packet)
-        logger.info(action, logger.LogResult.success, "ident", threading.get_ident(), "agency-id", agency_id)
+        packet.pack_message(_OPCODE_EOF, agency_id, str())
+        safe_socket.send_all(client_socket, packet.to_bytes())
+        logger.info(action, logger.LogResult.success, "ident", threading.get_ident(), "agency-id", packet.agency_id)
 
     def _wait_for_quorum(self):
         with self.condvar:
@@ -187,35 +144,35 @@ class Server:
     def _handle_client(self, client_socket: socket.socket):
         action = "handle-client"
         message_amount = 0
-        agency_id = None
+        packet = Packet()
         try:
             logger.info(action, logger.LogResult.in_progress)
             while self.running:
-                opcode, batch_size, agency_id, client_message = unpack_message(client_socket)
+                packet.unpack_message(client_socket)
                 
-                args = ["ident", threading.get_ident(), "agency-id", agency_id, "messages-amount", message_amount]
+                args = ["ident", threading.get_ident(), "agency-id", packet.agency_id, "messages-amount", message_amount]
 
                 # the conn ended while the client was still sending data
-                if opcode is None:
+                if packet.opcode is None:
                     logger.error(action, logger.LogResult.fail, *args)
                     return
                 # the client has no more data to send
-                elif opcode == _OPCODE_EOF:
+                elif packet.opcode == _OPCODE_EOF:
                     logger.info(action, logger.LogResult.success, *args)
                     break
 
                 message_amount += 1
-                self._store_message(batch_size, agency_id, client_message)
-                self._send_ack(client_socket, agency_id)
+                self._store_message(packet)
+                self._send_ack(client_socket, packet)
        
             self._wait_for_quorum()
             if self.running:
-                self._send_lottery_winners(client_socket, agency_id)
+                self._send_lottery_winners(client_socket, packet, packet.agency_id)
             
             logger.info(action, logger.LogResult.success)
         except Exception as e:
             if self.running:
-                args = ["ident", threading.get_ident(), "agency-id", agency_id, "messages-amount", message_amount, "err", e]
+                args = ["ident", threading.get_ident(), "agency-id", packet.agency_id, "messages-amount", message_amount, "err", e]
                 logger.error(action, logger.LogResult.fail, *args)
         finally:
             self._close_conn(client_socket)
