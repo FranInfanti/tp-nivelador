@@ -72,8 +72,8 @@ func connectToServer(host, port string) (net.Conn, error) {
 	return conn, err
 }
 
-func sendMessage(client *Client, opcode uint8, batches uint8, message []byte) error {
-	err := packet.PackMessage(client.packet, opcode, batches, client.config.AgencyId, message)
+func (client *Client) sendMessage(opcode uint8, batches uint8, message []byte) error {
+	err := client.packet.PackMessage(opcode, batches, client.config.AgencyId, message)
 	if err != nil {
 		return err
 	}
@@ -85,13 +85,13 @@ func sendMessage(client *Client, opcode uint8, batches uint8, message []byte) er
 	return nil
 }
 
-func uploadBatch(client *Client, inBatch uint8, batch []byte) error {
-	if err := sendMessage(client, packet.OPCODE_DATA, inBatch, batch); err != nil {
+func (client *Client) uploadBatch(inBatch uint8, batch []byte) error {
+	if err := client.sendMessage(packet.OPCODE_DATA, inBatch, batch); err != nil {
 		return err
 	}
 
 	// wait for ack
-	if err := packet.UnpackMessage(client.packet, client.conn); err != nil {
+	if err := client.packet.UnpackMessage(client.conn); err != nil {
 		return err
 	}
 
@@ -102,7 +102,7 @@ func uploadBatch(client *Client, inBatch uint8, batch []byte) error {
 	return nil
 }
 
-func uploadLotteryPlayers(client *Client, scanner *bufio.Scanner) error {
+func (client *Client) uploadLotteryPlayers(scanner *bufio.Scanner) error {
 	const action = "upload-lottery-players"
 	
 	messageId := 0
@@ -115,7 +115,7 @@ func uploadLotteryPlayers(client *Client, scanner *bufio.Scanner) error {
 		inBatch++
 
 		if inBatch == batchSize {
-			if err := uploadBatch(client, uint8(inBatch), batch); err != nil {
+			if err := client.uploadBatch(uint8(inBatch), batch); err != nil {
 				return err
 			}
 
@@ -129,7 +129,7 @@ func uploadLotteryPlayers(client *Client, scanner *bufio.Scanner) error {
 	}
 
 	if inBatch > 0 {
-		if err := uploadBatch(client, uint8(inBatch), batch); err != nil {
+		if err := client.uploadBatch(uint8(inBatch), batch); err != nil {
 			return err
 		}
 
@@ -140,12 +140,12 @@ func uploadLotteryPlayers(client *Client, scanner *bufio.Scanner) error {
 	return scanner.Err()
 }
 
-func downloadLotteryWinners(client *Client, writeFile *os.File) error {
+func (client *Client) downloadLotteryWinners(writeFile *os.File) error {
     const action = "download-lottery-winners"
 
     messageId := 0
     for {
-        if err := packet.UnpackMessage(client.packet, client.conn); err != nil {
+        if err := client.packet.UnpackMessage(client.conn); err != nil {
             return err
         }
 
@@ -161,7 +161,7 @@ func downloadLotteryWinners(client *Client, writeFile *os.File) error {
             return err
         }
 
-		if err := sendMessage(client, packet.OPCODE_ACK, 0, []byte{}); err != nil {
+		if err := client.sendMessage(packet.OPCODE_ACK, 0, []byte{}); err != nil {
 			return err
 		}
         
@@ -172,7 +172,7 @@ func downloadLotteryWinners(client *Client, writeFile *os.File) error {
     return nil
 }
 
-func sendData(client *Client) error {
+func (client *Client) sendData() error {
 	logger.Info("send-data", logger.InProgress)
 
 	file, err := os.Open(client.config.InputFile)
@@ -181,7 +181,7 @@ func sendData(client *Client) error {
 	}
 	defer file.Close()
 
-	if err := uploadLotteryPlayers(client, bufio.NewScanner(file)); err != nil {
+	if err := client.uploadLotteryPlayers(bufio.NewScanner(file)); err != nil {
 		return err
 	}
 
@@ -189,10 +189,10 @@ func sendData(client *Client) error {
 	return nil
 }
 
-func sendEOF(client *Client) error {
+func (client *Client) sendEOF() error {
 	logger.Info("send-eof", logger.InProgress)
 
-	if err := sendMessage(client, packet.OPCODE_EOF, 0, []byte{}); err != nil {
+	if err := client.sendMessage(packet.OPCODE_EOF, 0, []byte{}); err != nil {
 		return err
 	}
 
@@ -200,7 +200,7 @@ func sendEOF(client *Client) error {
 	return nil
 }
 
-func recvData(client *Client) error {
+func (client *Client) recvData() error {
 	logger.Info("recv-data", logger.InProgress)
 
 	file, err := os.OpenFile(client.config.OutputFile, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
@@ -209,7 +209,7 @@ func recvData(client *Client) error {
 	}
 	defer file.Close()
 
-	if err := downloadLotteryWinners(client, file); err != nil {
+	if err := client.downloadLotteryWinners(file); err != nil {
 		return err
 	}
 
@@ -230,7 +230,7 @@ func (client *Client) Run() error {
 		client.conn.Close()
 	}()
 
-	if err := sendData(client); err != nil {
+	if err := client.sendData(); err != nil {
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -239,7 +239,7 @@ func (client *Client) Run() error {
 		return err
 	}
 
-	if err := sendEOF(client); err != nil {
+	if err := client.sendEOF(); err != nil {
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -248,7 +248,7 @@ func (client *Client) Run() error {
 		return err
 	}
 
-	if err := recvData(client); err != nil {
+	if err := client.recvData(); err != nil {
 		if ctx.Err() != nil {
 			return nil
 		}

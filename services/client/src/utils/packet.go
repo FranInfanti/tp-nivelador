@@ -53,7 +53,7 @@ func (packet *Packet) Payload() []byte {
 
 // Modifys the packet with the information provided
 // 
-func PackMessage(packet *Packet, opcode byte, batches byte, agencyId byte, payload []byte) error {
+func (packet *Packet) PackMessage(opcode byte, batches byte, agencyId byte, payload []byte) error {
 	if opcode != OPCODE_DATA && opcode != OPCODE_EOF && opcode != OPCODE_ACK {
 		return errors.New("Invalid opcode")
 	}
@@ -81,7 +81,7 @@ func PackMessage(packet *Packet, opcode byte, batches byte, agencyId byte, paylo
 // Reads from the connection the packet that has been 
 // received and saves it in the packet
 // 
-func UnpackMessage(packet *Packet, conn net.Conn) error {
+func (packet *Packet) UnpackMessage(conn net.Conn) error {
 	header, err := safe_socket.RecvAll(conn, HEADER_SIZE)
 	if err != nil {
 		return err
