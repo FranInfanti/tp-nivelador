@@ -8,6 +8,7 @@ Redactar un breve informe en donde se detallen los aspectos más importantes de 
 2. [Mecanismos de Sincronización](#mecanismos-de-sincronización)
     * [Diccionario de _threds_](#diccionario-de-threads)
     * [Acceso a _Lottery_](#acceso-a-lottery)
+    * [Verificar el _quorum_](#verificar-el-quorum)
 
 ---
 
