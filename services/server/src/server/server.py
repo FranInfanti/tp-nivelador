@@ -80,11 +80,11 @@ class Server:
             i += 1
             bets.append(to_bet(packet.agency_id, batch))
 
-        with self.lottery_lock:
-            self.lottery.store_bets(bets)
-
         if i != packet.batches:
             raise ValueError(f"Batch size mismatch: expected {packet.batches}, got {i}")
+
+        with self.lottery_lock:
+            self.lottery.store_bets(bets)
 
     def _send_ack(self, client_socket: socket.socket, agency_id: int):
         ack = Packet(opcode=OPCODE_ACK, agency_id=agency_id)
