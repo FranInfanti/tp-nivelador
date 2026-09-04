@@ -7,6 +7,7 @@ from utils import shell_cmd, agency_file_generator
 DOCKER_COMPOSE_PATH = "./tests/compose_files/docker-compose-memory-profile.yaml"
 
 INPUT_FILE_PATH = "input/test-data.csv"
+
 MEDIUM_FILE_ITEM_COUNT = 10000
 LARGE_FILE_ITEM_COUNT = 100000
 
@@ -57,7 +58,7 @@ class MemoryProfile(TestCase):
 
         MemoryProfile._remove_agency_file()
 
-        if profile2 - profile1 > PROFILE_DIFF_THRESHOLD_BYTES:
+        if abs(profile2 - profile1) > PROFILE_DIFF_THRESHOLD_BYTES:
             raise ValueError(
                 f"Difference in memory profiles is too big: {profile1}B vs {profile2}B"
             )
