@@ -24,6 +24,8 @@ services:
       - INPUT_FILE=/input/test-data.csv
       - OUTPUT_FILE=/output/output-0.csv
       - BATCH_SIZE=8
+      - GOGC=20
+      - GOMEMLIMIT=20MiB
     volumes:
       - ../../input:/input
       - ../../output:/output
