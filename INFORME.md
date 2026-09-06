@@ -1,5 +1,3 @@
-Redactar un breve informe en donde se detallen los aspectos más importantes de la solución provista, como ser el protocolo de comunicación implementado y los mecanismos para sincronizar la ejecución concurrente.
-
 ## Tabla de Contenidos
 1. [Protocolo de Comunicación](#protocolo-de-comunicación)
     * [Formato de Paquete](#formato-de-paquete)
@@ -9,6 +7,9 @@ Redactar un breve informe en donde se detallen los aspectos más importantes de 
     * [Diccionario de _threds_](#diccionario-de-threads)
     * [Acceso a _Lottery_](#acceso-a-lottery)
     * [Verificar el _quorum_](#verificar-el-quorum)
+3. [Graceful Exit](#graceful-exit)
+    * [Servidor](#servidor)
+    * [Cliente](#cliente)
 
 ---
 
@@ -114,3 +115,28 @@ Luego se define una _condvar_ asociada a esa variable, para que cuando un _threa
 
 * Si se cumple, notifica a todos los demas _threads_ que estaban esperando.
 * Si NO se cumple, se va a dormir y espera a ser notificado por otro _thread_.
+
+## Graceful Exit
+
+### Servidor
+
+Para poder realizar un _graceful exit_ en el servidor hay que tener en cuenta de que va a haber mas de un _thread_ corriendo, y es necesario que todos liberen los recursos antes de que se envie la señal de `SIGKILL`, por lo que se implementó un _handler_ de esta señal que va a ser ejecutado por el _main thread_.
+
+> [!NOTE] 
+> Recordemos que la tarea de este _main thread_ consiste en aceptar conexiones y delegar el manejo a un _thread_ dedicado.
+
+Una vez se reciba la señal `SIGTERM` y se comienze a ejecutar el _handler_ correspondiente, el _main thread_ se debe asegurar de que todos los _threads_ activos finalicen antes de un tiempo limite `TIMEOUT`, que marca el momento en el que se recibe la señal de `SIGKILL`. Por lo que el _main thread_ realiza una serie de pasos.
+
+1. Setea una variable interna del servidor, que solamente es modificada en este _handler_ por el _main thread_, por lo que no hace falta sincronizar el acceso, que indica que el mismo ya no se encuentra corriendo.
+2. Marcar el comienzo en el que se comenzo a ejecutar la función y calcular cual es el tiempo restante según el `TIMEOUT` definido.
+3. Notificar a todos los demas _threads_ que se encuentran esperando en la _condvar_ para que evaluen de nuevo la condición y corten porque el servidor no esta mas corriendo.
+4. Enviar un mensaje de `FIN` a los _sockets_ de los _threads_ activos, para que salgan de esa condición bloqueante de lectura o dejen de recibir datos por parte del cliente.
+5. Por cada _thread_ esperar un tiempo para que finalize por su cuenta, dado que el tiempo es limitado, si existen _threads_ que tardan mucho, puede que a otros no se les de tiempo para esperarlos.
+6. Para todos aquellos _threads_ que no finalizaron por su cuenta, se les cierra la conexión de forma abrupta, cerrando el _socket_.
+6. Se cierra el _socket_ del servidor que se estaba utilizando para aceptar conexiones.
+
+### Cliente
+
+Para poder realizar un _graceful exit_, en caso de que se envie la señal de `SIGTERM` mientras el cliente se encuentra enviando o recibiendo datos, se lanza un _thread_, antes de que el cliente comienze a enviar datos, que va a ser el encargado de escuchar esta señal.
+
+En caso de que se reciba la señal del `SIGTERM`, el _thread_ lo que hara sera cerrar la conexión con el servidor, provocando un error en cadena cuando el cliente quiera enviar/recibir algo del _socket_. Sin embargo, este error no se lanzara porque se puede determinar si la causante de este fue gracias a la señal de `SIGTERM` o algo externo.
