@@ -19,40 +19,27 @@ const (
 )
 
 type Packet struct {
-	// Type of packet
 	Opcode   byte
-	// Amount of batches sended
 	Batches  byte
-	// Payload length
 	Length   uint16
-	// ID of the agency sending the packet
 	AgencyId byte
-	// Raw bytes containing the packet
 	raw      []byte
 }
 
-// Returns the memory address from an empty packet
-// 
 func NewPacket() *Packet {
 	return &Packet{
 		raw: make([]byte, HEADER_SIZE + PAYLOAD_SIZE),
 	}
 }
 
-// Returns the raw bytes containing the packet
-// 
 func (packet *Packet) ToBytes() []byte {
 	return packet.raw[:HEADER_SIZE + int(packet.Length)]
 }
 
-// Returns the payload contained by the packet
-// 
 func (packet *Packet) Payload() []byte {
     return packet.raw[HEADER_SIZE : HEADER_SIZE + int(packet.Length)]
 }
 
-// Modifys the packet with the information provided
-// 
 func (packet *Packet) PackMessage(opcode byte, batches byte, agencyId byte, payload []byte) error {
 	if opcode != OPCODE_DATA && opcode != OPCODE_EOF && opcode != OPCODE_ACK {
 		return errors.New("Invalid opcode")
@@ -78,9 +65,6 @@ func (packet *Packet) PackMessage(opcode byte, batches byte, agencyId byte, payl
 	return nil
 }
 
-// Reads from the connection the packet that has been 
-// received and saves it in the packet
-// 
 func (packet *Packet) UnpackMessage(conn net.Conn) error {
 	header, err := safe_socket.RecvAll(conn, HEADER_SIZE)
 	if err != nil {
