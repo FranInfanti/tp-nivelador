@@ -30,6 +30,32 @@ class Server:
 
         signal.signal(signal.SIGTERM, self._sigterm_handler)
 
+    def _shutdown_threds_conn(self) -> list[threading.Thread]:
+        with self.conns_lock:
+            for client_socket in list(self.conns.values()):
+                try: 
+                    client_socket.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
+            
+            return list(self.conns.keys())
+
+    def _wait_for_threads(self, threads: list[threading.Thread], deadline: float):
+        for thread in threads:
+            time_left = deadline - time.time()
+            if time_left <= 0:
+                break
+
+            thread.join(timeout=time_left)
+
+    def _close_threads_conn(self):
+        with self.conns_lock:
+            for client_socket in list(self.conns.values()):
+                try:
+                    client_socket.close()
+                except Exception:
+                    pass
+
     def _sigterm_handler(self, _: int, frame: FrameType | None) -> NoReturn:
         action = "sigterm-received"
         logger.info(action, logger.LogResult.in_progress)
@@ -37,32 +63,13 @@ class Server:
         self.running = False
         deadline = time.time() + _TIMEOUT
         
-        # wake up the threads waiting for quorum...
         with self.condvar:
             self.condvar.notify_all()
         
-        with self.conns_lock:
-            for client_socket in list(self.conns.values()):
-                # wake up the threads waiting for messages... 
-                try: 
-                    client_socket.shutdown(socket.SHUT_RDWR)
-                except Exception:
-                    pass
-            threads = list(self.conns.keys())
+        threads = self._shutdown_threds_conn()
 
-        for thread in threads:
-            time_left = deadline - time.time()
-            if time_left <= 0:
-                break
-            # wait for the threads to finish...
-            thread.join(timeout=time_left)
-
-        with self.conns_lock:
-            for client_socket in list(self.conns.values()):
-                try:
-                    client_socket.close()
-                except Exception:
-                    pass
+        self._wait_for_threads(threads, deadline)
+        self._close_threads_conn()
 
         if self.server_socket:
             try:
@@ -91,8 +98,10 @@ class Server:
         safe_socket.send_all(client_socket, ack.to_bytes())
 
     def _send_lottery_winners(self, client_socket: socket.socket, agency_id: int):
-        action = "send-lottery-winners"
+        if not self.running:
+            return
 
+        action = "send-lottery-winners"
         logger.info(action, logger.LogResult.in_progress, "ident", threading.get_ident(), "agency-id", agency_id)
     
         with self.lottery_lock:
@@ -108,7 +117,6 @@ class Server:
                 if ack is None or ack.opcode != OPCODE_ACK:
                     raise ValueError("Expected ACK")
 
-        # there are no more winners then send OEF
         eof = Packet(opcode=OPCODE_EOF, agency_id=agency_id)
         safe_socket.send_all(client_socket, eof.to_bytes())
         logger.info(action, logger.LogResult.success, "ident", threading.get_ident(), "agency-id", agency_id)
@@ -139,13 +147,11 @@ class Server:
             logger.info(action, logger.LogResult.in_progress)
             while self.running:
                 packet = Packet.from_socket(client_socket)
-
                 if packet is None:
                     raise ValueError("The conn ended while the client was still sending data")
 
                 agency_id = packet.agency_id
 
-                # the client has no more data to send
                 if packet.opcode == OPCODE_EOF:
                     args = ["ident", threading.get_ident(), "agency-id", agency_id, "messages-amount", message_amount]
                     logger.info(action, logger.LogResult.success, *args)
@@ -154,11 +160,9 @@ class Server:
                 message_amount += 1
                 self._store_message(packet)
                 self._send_ack(client_socket, agency_id)
-       
+
             self._wait_for_quorum()
-            if self.running:
-                self._send_lottery_winners(client_socket, agency_id)
-            
+            self._send_lottery_winners(client_socket, agency_id)
             logger.info(action, logger.LogResult.success)
         except Exception as e:
             if self.running:
